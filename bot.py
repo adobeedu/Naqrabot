@@ -13,14 +13,17 @@ from telegram.ext import (
     ConversationHandler,
 )
 from telegram.error import BadRequest
+# --- إضافات جديدة لخادم الويب الوهمي ---
+from flask import Flask
+import threading
+# -----------------------------------------
 
 # --- الإعدادات الأساسية ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-# تم وضع المعرف الذي ارسلته مع اضافة -100 في البداية وهو التنسيق الصحيح
 CHANNEL_ID = -1002627341759
-CHANNEL_USERNAME = "mukhtaredu" # اسم مستخدم القناة
+CHANNEL_USERNAME = "mukhtaredu"
 
-# إعداد سجلات الأخطاء (للتشخيص)
+# إعداد سجلات الأخطاء
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -32,26 +35,19 @@ SELECTING_FORMAT, AWAITING_TRIM_TIMES = range(2)
 # --- دوال مساعدة ---
 
 async def is_user_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
-    """التحقق مما إذا كان المستخدم مشتركًا في القناة."""
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        if member.status in ['member', 'administrator', 'creator']:
-            return True
-        else:
-            return False
+        return member.status in ['member', 'administrator', 'creator']
     except BadRequest as e:
         if "user not found" in e.message.lower():
-            logger.warning(f"User {user_id} not found in channel {CHANNEL_ID}. They are not a member.")
             return False
-        else:
-            logger.error(f"Error checking subscription for user {user_id}: {e}")
-            return False # نفترض عدم الاشتراك عند حدوث خطأ غير متوقع
+        logger.error(f"Error checking subscription for user {user_id}: {e}")
+        return False
     except Exception as e:
         logger.error(f"Unexpected error checking subscription for user {user_id}: {e}")
         return False
 
 def format_duration(duration_iso):
-    """تحويل مدة الفيديو من صيغة ISO 8601 إلى HH:MM:SS"""
     if not duration_iso: return "غير معروف"
     duration = isodate.parse_duration(duration_iso)
     total_seconds = int(duration.total_seconds())
@@ -61,7 +57,6 @@ def format_duration(duration_iso):
     else: return f"{minutes:02}:{seconds:02}"
 
 def format_bytes(size):
-    """تحويل حجم الملف من بايت إلى صيغة مقروءة (MB, GB)"""
     if size is None: return "غير معروف"
     power = 1024; n = 0
     power_labels = {0: '', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
@@ -72,7 +67,6 @@ def format_bytes(size):
 # --- دوال المحادثة ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """دالة البداية والرد على /start مع التحقق من الاشتراك"""
     user_id = update.effective_user.id
     if not await is_user_subscribed(context, user_id):
         keyboard = [[InlineKeyboardButton("✅ اشتراك في القناة", url=f"https://t.me/{CHANNEL_USERNAME}")]]
@@ -89,7 +83,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return SELECTING_FORMAT
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """معالجة الرابط المرسل مع التحقق من الاشتراك"""
     user_id = update.effective_user.id
     if not await is_user_subscribed(context, user_id):
         keyboard = [[InlineKeyboardButton("✅ اشتراك في القناة", url=f"https://t.me/{CHANNEL_USERNAME}")]]
@@ -107,13 +100,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     processing_message = await update.message.reply_text("جاري تحليل الرابط... ⏳")
     
-    # --- الكتلة المحسنة للتعامل مع الأخطاء ---
     try:
         ydl_opts = {'noplaylist': True, 'quiet': True, 'extract_flat': 'in_playlist'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        # التحقق من وجود معلومات قابلة للاستخدام
         if not info:
             raise yt_dlp.utils.DownloadError("لم يتم العثور على معلومات من الرابط.")
 
@@ -152,7 +143,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     except Exception as e:
         logger.error(f"Error processing link {url}: {e}")
         await processing_message.edit_text("فشل تحليل الرابط. قد يكون الرابط خاصًا، غير مدعوم، أو أن هناك مشكلة في الاتصال.")
-        return ConversationHandler.END # ننهي المحادثة هنا لمنع البوت من التجمد
+        return ConversationHandler.END
 
 async def handle_format_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -228,7 +219,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-def main() -> None:
+def main_bot_logic() -> None:
+    """الدالة التي تحتوي على منطق البوت الرئيسي"""
     if not TOKEN: raise ValueError("لم يتم العثور على TELEGRAM_TOKEN!")
     app = Application.builder().token(TOKEN).build()
     if not os.path.exists('downloads'): os.makedirs('downloads')
@@ -244,8 +236,26 @@ def main() -> None:
     )
     app.add_handler(conv_handler)
     
-    print("البوت بدأ التشغيل بالنسخة النهائية (معالجة أخطاء محسنة)...")
+    print("بوت تيليغرام بدأ التشغيل...")
     app.run_polling()
 
+# --- كود تشغيل الخادم الوهمي لإبقاء Render نشطًا ---
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def index():
+    return "Bot is running!"
+
+def run_flask():
+    # نحصل على المنفذ من متغيرات البيئة التي يوفرها Render
+    port = int(os.environ.get("PORT", 8080))
+    app_flask.run(host='0.0.0.0', port=port)
+# ----------------------------------------------------
+
 if __name__ == "__main__":
-    main()
+    # تشغيل خادم فلاسك في خيط منفصل
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+    
+    # تشغيل البوت
+    main_bot_logic()
