@@ -38,23 +38,20 @@ async def is_user_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
-    except BadRequest as e:
-        if "user not found" in e.message.lower():
-            return False
-        logger.error(f"Error checking subscription for user {user_id}: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error checking subscription for user {user_id}: {e}")
+    except Exception:
         return False
 
 def format_duration(duration_iso):
     if not duration_iso: return "غير معروف"
-    duration = isodate.parse_duration(duration_iso)
-    total_seconds = int(duration.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0: return f"{hours:02}:{minutes:02}:{seconds:02}"
-    else: return f"{minutes:02}:{seconds:02}"
+    try:
+        duration = isodate.parse_duration(duration_iso)
+        total_seconds = int(duration.total_seconds())
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours > 0: return f"{hours:02}:{minutes:02}:{seconds:02}"
+        else: return f"{minutes:02}:{seconds:02}"
+    except:
+        return duration_iso # Fallback to original string if parsing fails
 
 def format_bytes(size):
     if size is None: return "غير معروف"
@@ -64,8 +61,8 @@ def format_bytes(size):
         size /= power; n += 1
     return f"{size:.1f} {power_labels[n]}B"
 
-# --- دوال المحادثة ---
-
+# --- دوال المحادثة (منطق البوت الرئيسي) ---
+# ... (هنا كل دوال البوت مثل start, handle_link, etc. لم تتغير)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if not await is_user_subscribed(context, user_id):
@@ -76,7 +73,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=reply_markup
         )
         return ConversationHandler.END
-    
+        
     await update.message.reply_text(
         "أهلاً بك في بوت NAQRA 🤖\n\nأرسل لي أي رابط من منصات التواصل الاجتماعي وسأقوم بتحليله لك."
     )
@@ -99,7 +96,7 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return SELECTING_FORMAT
 
     processing_message = await update.message.reply_text("جاري تحليل الرابط... ⏳")
-    
+        
     try:
         ydl_opts = {'noplaylist': True, 'quiet': True, 'extract_flat': 'in_playlist'}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -111,11 +108,11 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         context.user_data['info'] = info
         title = info.get('title', 'بدون عنوان')
         thumbnail = info.get('thumbnail')
-        duration = format_duration(info.get('duration_string'))
-        
+        duration = format_duration(info.get('duration_string') or info.get('duration'))
+            
         caption = f"🎬 **العنوان:** {title}\n⏳ **المدة:** {duration}"
         keyboard = []
-        
+            
         video_formats = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4']
         added_qualities = set()
         for f in sorted(video_formats, key=lambda x: x.get('height', 0), reverse=True):
@@ -124,19 +121,20 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
                 filesize = format_bytes(f.get('filesize') or f.get('filesize_approx'))
                 keyboard.append([InlineKeyboardButton(f"فيديو 🎥 {quality}p ({filesize})", callback_data=f"quality_{quality}")])
                 added_qualities.add(quality)
-        
-        keyboard.append([InlineKeyboardButton("صوت 🎵 (MP3)", callback_data="audio")])
-        keyboard.append([InlineKeyboardButton("قص المقطع ✂️", callback_data="trim")])
-        
-        if 'entries' in info and info.get('playlist_count', 0) > 1:
-            keyboard.append([InlineKeyboardButton("تنزيل أول 5 من القائمة 📂", callback_data="playlist_5")])
+            
+        if not added_qualities: # If no video found, still add audio button
+             keyboard.append([InlineKeyboardButton("صوت 🎵 (MP3)", callback_data="audio")])
+        else:
+             keyboard.insert(len(added_qualities), [InlineKeyboardButton("صوت 🎵 (MP3)", callback_data="audio")])
 
+        keyboard.append([InlineKeyboardButton("قص المقطع ✂️", callback_data="trim")])
+            
         reply_markup = InlineKeyboardMarkup(keyboard)
         if thumbnail:
             await context.bot.send_photo(chat_id=update.effective_chat.id, photo=thumbnail, caption=caption, reply_markup=reply_markup, parse_mode='Markdown')
         else:
             await update.message.reply_text(caption, reply_markup=reply_markup, parse_mode='Markdown')
-        
+            
         await processing_message.delete()
         return SELECTING_FORMAT
 
@@ -180,7 +178,7 @@ async def download_and_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
         elif "quality_" in choice:
             quality = choice.split('_')[1]
             ydl_opts['format'] = f'bestvideo[height<={quality}][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-        
+            
         if trim_times:
             try:
                 start_time, end_time = trim_times.replace(" ", "").split('-')
@@ -193,7 +191,7 @@ async def download_and_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
             await context.bot.send_message(chat_id, "بدء عملية التنزيل من المصدر...")
             download_info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(download_info)
-            
+                
             if choice == "audio":
                 base, _ = os.path.splitext(file_path)
                 final_path = base + ".mp3"
@@ -201,7 +199,7 @@ async def download_and_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
                 file_path = final_path
 
         await context.bot.send_message(chat_id, "اكتمل التنزيل. جاري الرفع إليك...")
-        
+            
         if choice == "audio":
             await context.bot.send_audio(chat_id=chat_id, audio=open(file_path, 'rb'), write_timeout=300)
         else:
@@ -219,7 +217,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-def main_bot_logic() -> None:
+def main_bot_logic():
     """الدالة التي تحتوي على منطق البوت الرئيسي"""
     if not TOKEN: raise ValueError("لم يتم العثور على TELEGRAM_TOKEN!")
     app = Application.builder().token(TOKEN).build()
@@ -235,7 +233,7 @@ def main_bot_logic() -> None:
         conversation_timeout=300
     )
     app.add_handler(conv_handler)
-    
+        
     print("بوت تيليغرام بدأ التشغيل...")
     app.run_polling()
 
@@ -247,7 +245,6 @@ def index():
     return "Bot is running!"
 
 def run_flask():
-    # نحصل على المنفذ من متغيرات البيئة التي يوفرها Render
     port = int(os.environ.get("PORT", 8080))
     app_flask.run(host='0.0.0.0', port=port)
 # ----------------------------------------------------
@@ -256,6 +253,6 @@ if __name__ == "__main__":
     # تشغيل خادم فلاسك في خيط منفصل
     flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
-    
+        
     # تشغيل البوت
     main_bot_logic()
